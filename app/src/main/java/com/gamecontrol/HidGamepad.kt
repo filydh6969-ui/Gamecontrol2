@@ -11,8 +11,13 @@ import android.content.Context
 import java.util.concurrent.Executors
 
 /**
- * Hace que el celular se anuncie como un gamepad Bluetooth HID.
- * Reporte (ID 1, 9 bytes): LX, LY, RX, RY, LT, RT, hat, botones(2 bytes)
+ * Modo TECLADO Bluetooth. Los botones del control se convierten en teclas
+ * con el mapeo por defecto de RetroArch:
+ *   Cruceta / stick izq. -> flechas
+ *   A -> Z, B -> X, X -> A, Y -> S   (posiciones del control Xbox)
+ *   LB -> Q, RB -> W, LT -> E, RT -> R
+ *   Back -> Shift derecho (Select), Start -> Enter
+ *   Stick derecho -> I / J / K / L
  */
 @SuppressLint("MissingPermission")
 class HidGamepad(
@@ -26,47 +31,21 @@ class HidGamepad(
     private val executor = Executors.newSingleThreadExecutor()
 
     private val descriptor: ByteArray = intArrayOf(
-        0x05, 0x01,             // Usage Page (Generic Desktop)
-        0x09, 0x05,             // Usage (Game Pad)
-        0xA1, 0x01,             // Collection (Application)
-        0x85, 0x01,             //   Report ID (1)
-        0x09, 0x01,             //   Usage (Pointer)
-        0xA1, 0x00,             //   Collection (Physical)
-        0x09, 0x30, 0x09, 0x31, //     X, Y
-        0x09, 0x32, 0x09, 0x35, //     Z, Rz
-        0x15, 0x00,             //     Logical Min 0
-        0x26, 0xFF, 0x00,       //     Logical Max 255
-        0x75, 0x08,             //     Report Size 8
-        0x95, 0x04,             //     Report Count 4
-        0x81, 0x02,             //     Input (Data, Var, Abs)
-        0xC0,                   //   End Collection
-        0x09, 0x33, 0x09, 0x34, //   Rx, Ry (gatillos)
-        0x15, 0x00,
-        0x26, 0xFF, 0x00,
-        0x75, 0x08,
-        0x95, 0x02,
-        0x81, 0x02,
-        0x09, 0x39,             //   Hat switch
-        0x15, 0x01,
-        0x25, 0x08,
-        0x35, 0x00,
-        0x46, 0x3B, 0x01,
-        0x65, 0x14,
-        0x75, 0x04,
-        0x95, 0x01,
-        0x81, 0x42,             //   Input (Data, Var, Abs, Null state)
-        0x75, 0x04,             //   Relleno 4 bits
-        0x95, 0x01,
-        0x81, 0x03,
-        0x05, 0x09,             //   Usage Page (Button)
-        0x19, 0x01,
-        0x29, 0x10,             //   16 botones
-        0x15, 0x00,
-        0x25, 0x01,
-        0x75, 0x01,
-        0x95, 0x10,
-        0x81, 0x02,
-        0xC0                    // End Collection
+        0x05, 0x01, 0x09, 0x06, 0xA1, 0x01,   // Keyboard, Application
+        0x85, 0x01,                           // Report ID 1
+        0x05, 0x07, 0x19, 0xE0, 0x29, 0xE7,   // Modificadores
+        0x15, 0x00, 0x25, 0x01,
+        0x75, 0x01, 0x95, 0x08, 0x81, 0x02,
+        0x95, 0x01, 0x75, 0x08, 0x81, 0x01,   // Reservado
+        0x95, 0x05, 0x75, 0x01,               // LEDs (salida)
+        0x05, 0x08, 0x19, 0x01, 0x29, 0x05,
+        0x91, 0x02,
+        0x95, 0x01, 0x75, 0x03, 0x91, 0x01,
+        0x95, 0x06, 0x75, 0x08,               // 6 teclas
+        0x15, 0x00, 0x25, 0x65,
+        0x05, 0x07, 0x19, 0x00, 0x29, 0x65,
+        0x81, 0x00,
+        0xC0
     ).map { it.toByte() }.toByteArray()
 
     private val callback = object : BluetoothHidDevice.Callback() {
@@ -100,10 +79,10 @@ class HidGamepad(
                     val h = proxy as BluetoothHidDevice
                     hid = h
                     val sdp = BluetoothHidDeviceAppSdpSettings(
-                        "Gamepad",
-                        "Android Gamepad",
+                        "Gamecontrol Keyboard",
+                        "Teclado Bluetooth",
                         "Gamecontrol",
-                        BluetoothHidDevice.SUBCLASS2_GAMEPAD,
+                        BluetoothHidDevice.SUBCLASS1_KEYBOARD,
                         descriptor
                     )
                     val ok = h.registerApp(sdp, null, null, executor, callback)
@@ -123,19 +102,41 @@ class HidGamepad(
         onStatus(if (ok) "Conectando..." else "No se pudo conectar")
     }
 
+    // Mantiene la misma firma que la versión gamepad; la convierte a teclas.
     fun send(lx: Int, ly: Int, rx: Int, ry: Int, lt: Int, rt: Int, hat: Int, buttons: Int) {
         val h = hid ?: return
         val d = host ?: return
-        val r = ByteArray(9)
-        r[0] = lx.toByte()
-        r[1] = ly.toByte()
-        r[2] = rx.toByte()
-        r[3] = ry.toByte()
-        r[4] = lt.toByte()
-        r[5] = rt.toByte()
-        r[6] = hat.toByte()
-        r[7] = (buttons and 0xFF).toByte()
-        r[8] = ((buttons shr 8) and 0xFF).toByte()
+
+        val up = hat == 1 || hat == 2 || hat == 8 || ly < 64
+        val down = hat in 4..6 || ly > 192
+        val right = hat in 2..4 || lx > 192
+        val left = hat in 6..8 || lx < 64
+
+        val keys = ArrayList<Int>()
+        if (up) keys.add(0x52)
+        if (down) keys.add(0x51)
+        if (left) keys.add(0x50)
+        if (right) keys.add(0x4F)
+
+        fun on(bit: Int) = (buttons shr bit) and 1 == 1
+        if (on(0)) keys.add(0x1D)   // A -> Z
+        if (on(1)) keys.add(0x1B)   // B -> X
+        if (on(2)) keys.add(0x04)   // X -> A
+        if (on(3)) keys.add(0x16)   // Y -> S
+        if (on(4)) keys.add(0x14)   // LB -> Q
+        if (on(5)) keys.add(0x1A)   // RB -> W
+        if (lt > 127) keys.add(0x08) // LT -> E
+        if (rt > 127) keys.add(0x15) // RT -> R
+        if (on(7)) keys.add(0x28)   // Start -> Enter
+        if (ry < 64) keys.add(0x0C)  // I
+        if (ry > 192) keys.add(0x0E) // K
+        if (rx < 64) keys.add(0x0D)  // J
+        if (rx > 192) keys.add(0x0F) // L
+
+        val r = ByteArray(8)
+        r[0] = if (on(6)) 0x20 else 0x00   // Back -> Shift derecho (Select)
+        val k = keys.take(6)
+        for (i in k.indices) r[2 + i] = k[i].toByte()
         h.sendReport(d, 1, r)
     }
 
